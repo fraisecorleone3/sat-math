@@ -59,7 +59,10 @@ const L=['A','B','C','D','E','F'];
 const dcl=d=>d==='Hard'?'hard':d==='Medium'?'med':d==='Easy'?'easy':'mix';
 const pct=(a,b)=>b?Math.round(100*a/b):0;
 const lvlTag=l=>l?`<span class="tag ${dcl(l)}">${l==='All'?'Mixed':esc(l)}</span>`:'';
-const quizTitle=(skill,level,seq)=>skillName(skill)+' · '+(level==='All'?'Mixed':level)+' #'+seq;
+const quizTitle=(skill,level,label)=>skillName(skill)+' · '+(level==='All'?'Mixed':level)+' · '+label;
+const quizLabel=q=>q.label||('Quiz #'+q.seq);
+const MIXED_TYPES='Mixed types';
+const stemText=q=>(q.stem||'').replace(/\{\{img\}\}/g,' [figure] ').replace(/<[^>]+>/g,' ').replace(/\$/g,'');
 const shuffle=a=>{a=a.slice();for(let i=a.length-1;i>0;i--){const j=Math.floor(Math.random()*(i+1));[a[i],a[j]]=[a[j],a[i]];}return a;};
 const slug=s=>(s||'').normalize('NFD').replace(/[̀-ͯ]/g,'').toLowerCase().replace(/[^a-z0-9._-]/g,'');
 const toEmail=u=>u.includes('@')?u.trim().toLowerCase():slug(u)+'@'+DOMAIN;
@@ -74,7 +77,12 @@ function toNum(v){
   if(!/^-?\d*\.?\d+$/.test(t))return null;
   return parseFloat(t);
 }
+/* several accepted answers are separated by ";" (e.g. "10/3;15/4") */
+const answersOf=answer=>(answer??'').toString().split(';').map(x=>x.trim()).filter(Boolean);
 function sprCorrect(given,answer){
+  return answersOf(answer).some(a=>sprMatch(given,a));
+}
+function sprMatch(given,answer){
   const g=(given??'').toString().trim(),a=(answer??'').toString().trim();
   if(g==='')return false;
   if(g.replace(/\s+/g,'').toLowerCase()===a.replace(/\s+/g,'').toLowerCase())return true;
@@ -89,7 +97,30 @@ function isRight(q,given){
   if(given===undefined||given===null)return false;
   return q.type==='mcq'?Number(given)===q.correct:sprCorrect(given,q.answer);
 }
+/* ---------- figures: one JSON pack per skill in figures/, loaded on demand ---------- */
+const FIGS={};
+function figPack(sk){
+  if(!FIGS[sk])FIGS[sk]=fetch('figures/'+encodeURIComponent(sk)+'.json').then(r=>r.ok?r.json():{}).catch(()=>{delete FIGS[sk];return {};});
+  return FIGS[sk];
+}
+const figImg=(q,key,cls)=>`<img class="${cls}" data-fig="${esc(key)}" data-sk="${esc(q.skill)}" alt="Figure">`;
+function loadFigs(root){
+  (root||document).querySelectorAll('img[data-fig]:not([src])').forEach(el=>{
+    figPack(el.dataset.sk).then(m=>{
+      const src=m[el.dataset.fig];
+      if(!src){el.outerHTML='<span class="figmiss">Figure not available</span>';return;}
+      el.onload=()=>{el.style.width=Math.round(el.naturalWidth/(el.classList.contains('cfig')?1.5:1.9))+'px';};
+      el.src=src;
+    });
+  });
+}
+function stemHtml(q){
+  const img=q.image?`<span class="figwrap">${figImg(q,q.image,'qfig')}</span>`:'';
+  const s=esc(q.stem||'');
+  return s.includes('{{img}}')?s.replace('{{img}}',img).replace(/\{\{img\}\}/g,''):s+img;
+}
 function typeset(root){
+  if(root)loadFigs(root);
   if(!root||!window.renderMathInElement)return;
   try{window.renderMathInElement(root,{delimiters:[{left:'$$',right:'$$',display:true},{left:'$',right:'$',display:false}],throwOnError:false});}catch(e){}
 }
@@ -124,7 +155,7 @@ async function fetchAll(table,{select='*',order='id',mod}={}){
 }
 
 let ME=null;            // my profile
-const D={quizzes:[],Q:new Map(),attempts:[],access:[],students:[],settings:{quiz_size:10,split_by_level:true}};
+const D={quizzes:[],Q:new Map(),attempts:[],access:[],students:[],settings:{quiz_size:10,split_by_level:true,by_tag:true,min_tag:5}};
 let RUN=null;
 const view={name:'boot',p:{}};
 
@@ -146,7 +177,7 @@ async function loadData(){
     ]);
     D.access=access;
     D.students=profiles.filter(p=>p.role==='student');
-    if(settings.data)D.settings=settings.data;
+    if(settings.data)D.settings={...D.settings,...settings.data};
   }else{
     D.access=[];D.students=[];
   }
@@ -416,7 +447,7 @@ function scorePill(s){
   return `<span class="pill ${r>=.8?'done':r>=.5?'warn':'bad'}" title="Best score">${s.best}/${s.bestTotal}</span>`;
 }
 function quizRow(q,s){
-  return `<div class="qrow"><div><span class="nm">Quiz #${q.seq}</span>
+  return `<div class="qrow"><div><span class="nm">${esc(quizLabel(q))}</span>
       <span class="tiny muted mono" style="margin-left:8px">${q.question_ids.length} q${s?` · ${s.n} attempt${s.n>1?'s':''}`:''}</span></div>
     <div class="row" style="gap:8px">${scorePill(s)}
       ${s&&s.lastId?`<button class="btn ghost xs" onclick="go('attempt',{id:${s.lastId}})">Review</button>`:''}
@@ -483,7 +514,7 @@ function beginQuiz(quizId){
 function saveRun(){if(!ME)return;lsSet('satm_run_'+ME.id,RUN?{...RUN,questions:undefined}:null);}
 function dropRun(){if(!confirm('Discard this unfinished quiz?'))return;RUN=null;saveRun();render();}
 
-let MIX={skills:new Set(),levels:new Set(LEVELS),n:10};
+let MIX={skills:new Set(),levels:new Set(LEVELS),tagsOff:new Set(),n:10};
 VIEWS.mix=()=>{
   const pool=accessiblePool();
   const sks=SKILL_ORDER.filter(k=>pool.some(q=>q.skill===k));
@@ -496,6 +527,7 @@ VIEWS.mix=()=>{
       <div class="chips">${sks.map(k=>`<button class="chip ${MIX.skills.has(k)?'on':''}" onclick="mixTgl('skills','${k}')">${esc(skillName(k))} <span class="mono" style="opacity:.6">${pool.filter(q=>q.skill===k).length}</span></button>`).join('')}</div>
       <div class="sect">Difficulty</div>
       <div class="chips">${LEVELS.map(l=>`<button class="chip ${MIX.levels.has(l)?'on':''}" onclick="mixTgl('levels','${l}')">${l}</button>`).join('')}</div>
+      ${mixTagsHtml(pool)}
       <div class="sect">Number of questions</div>
       <input type="number" id="mixn" min="1" max="60" value="${MIX.n}" style="max-width:130px" onchange="MIX.n=parseInt(this.value)||10">
       <p class="tiny muted" id="mixav">${mixPool().length} questions match.</p>
@@ -503,7 +535,32 @@ VIEWS.mix=()=>{
       <button class="btn go wide" style="margin-top:20px" onclick="beginMix()">Start</button></div>`;
 };
 function mixTgl(set,k){MIX[set].has(k)?MIX[set].delete(k):MIX[set].add(k);MIX.n=parseInt($('mixn').value)||MIX.n;render();}
-function mixPool(){return accessiblePool().filter(q=>MIX.skills.has(q.skill)&&MIX.levels.has(q.difficulty));}
+/* optional filter by question type (tag), grouped by the selected skills */
+const tagKey=q=>q.skill+'|'+(q.tag||'Unclassified');
+function mixTagsHtml(pool){
+  const base=pool.filter(q=>MIX.skills.has(q.skill)&&MIX.levels.has(q.difficulty));
+  const groups=SKILL_ORDER.filter(k=>MIX.skills.has(k)).map(k=>{
+    const cnt=new Map();
+    base.filter(q=>q.skill===k).forEach(q=>cnt.set(q.tag||'Unclassified',(cnt.get(q.tag||'Unclassified')||0)+1));
+    const tags=[...cnt.keys()].sort((a,b)=>(a==='Unclassified')-(b==='Unclassified')||a.localeCompare(b));
+    if(!tags.length)return '';
+    return `<div class="tagsub">${esc(skillName(k))}</div><div class="chips">${tags.map(t=>{const key=k+'|'+t;
+      return `<button class="chip ${MIX.tagsOff.has(key)?'':'on'}" data-k="${esc(key)}" onclick="mixTag(this.dataset.k)">${esc(t)} <span class="mono" style="opacity:.6">${cnt.get(t)}</span></button>`;}).join('')}</div>`;
+  }).join('');
+  if(!groups)return '';
+  const off=[...MIX.tagsOff].filter(k=>MIX.skills.has(k.split('|')[0])).length;
+  return `<details class="acc" data-k="mixtags" style="margin-top:16px" ${isOpen('mixtags')?'open':''}>
+    <summary><span class="ttl"><span class="chev">▶</span><b>Question types</b><span class="tiny muted">${off?off+' excluded':'all included'}</span></span></summary>
+    <div class="abody"><div class="row" style="gap:14px"><button class="link" style="font-size:13px" onclick="mixTagsAll(true)">Select all</button><button class="link" style="font-size:13px" onclick="mixTagsAll(false)">Clear all</button></div>${groups}</div></details>`;
+}
+function mixTag(key){MIX.tagsOff.has(key)?MIX.tagsOff.delete(key):MIX.tagsOff.add(key);MIX.n=parseInt($('mixn').value)||MIX.n;render();}
+function mixTagsAll(on){
+  MIX.n=parseInt($('mixn').value)||MIX.n;
+  if(on)MIX.tagsOff.clear();
+  else accessiblePool().filter(q=>MIX.skills.has(q.skill)).forEach(q=>MIX.tagsOff.add(tagKey(q)));
+  render();
+}
+function mixPool(){return accessiblePool().filter(q=>MIX.skills.has(q.skill)&&MIX.levels.has(q.difficulty)&&!MIX.tagsOff.has(tagKey(q)));}
 function beginMix(){
   MIX.n=Math.max(1,parseInt($('mixn').value)||10);
   const pool=mixPool();
@@ -516,7 +573,7 @@ function beginMix(){
 ============================================================ */
 function qBlock(q,i,{review=false,given,flag=false,readonly=false}={}){
   if(!q)return `<div class="qcard"><div class="qnum">Question ${i+1}</div><p class="muted tiny">This question is no longer available.</p></div>`;
-  const tags=lvlTag(q.difficulty);
+  const tags=lvlTag(q.difficulty)+(q.tag?`<span class="tag ttag">${esc(q.tag)}</span>`:'');
   const flagged=review?flag:!!(RUN&&RUN.flags[q.id]);
   const flagBtn=readonly?(flagged?`<span class="pill warn">${I.flag.replace('<svg','<svg width="13" height="13"')} Flagged</span>`:'')
     :`<button class="flagbtn ${flagged?'on':''}" id="fl_${q.id}" onclick="tglFlag(${q.id})">${I.flag}<span>${flagged?'Flagged':'Flag for '+esc(TUTOR)}</span></button>`;
@@ -525,9 +582,9 @@ function qBlock(q,i,{review=false,given,flag=false,readonly=false}={}){
     const sel=review?given:(RUN?RUN.answers[q.id]:undefined);
     body=`<div class="choices">${(q.choices||[]).map((c,ci)=>{
       let cls='';
-      if(review){if(ci===q.correct)cls='correct';else if(Number(sel)===ci)cls='wrong';}
+      if(review){if(ci===q.correct)cls='correct';else if(sel!==undefined&&sel!==null&&sel!==''&&Number(sel)===ci)cls='wrong';}
       else if(sel===ci)cls='sel';
-      return `<button class="choice ${cls}" ${review?'disabled':`onclick="choose(${q.id},${ci})"`}><span class="bub">${L[ci]}</span><span class="ctext">${c}</span></button>`;
+      return `<button class="choice ${cls}" ${review?'disabled':`onclick="choose(${q.id},${ci})"`}><span class="bub">${L[ci]}</span><span class="ctext">${q.choice_images&&q.choice_images[ci]?figImg(q,q.choice_images[ci],'cfig'):esc(c)}</span></button>`;
     }).join('')}</div>${review&&(given===undefined||given===null)?'<p class="tiny mono" style="color:var(--red);margin:10px 0 0">Not answered</p>':''}`;
   }else{
     const val=review?(given??''):(RUN&&RUN.answers[q.id]!=null?RUN.answers[q.id]:'');
@@ -536,15 +593,28 @@ function qBlock(q,i,{review=false,given,flag=false,readonly=false}={}){
       <input type="text" ${review?'disabled':''} value="${esc(val)}" placeholder="e.g. 3 or 5/2" inputmode="decimal" autocomplete="off"
         ${review?'':`oninput="typeIn(${q.id},this.value)"`}
         style="${review?(ok?'background:var(--green-soft)':'background:var(--red-soft)'):''}"></label>
-      ${review?`<div class="tiny mono" style="color:${ok?'var(--green)':'var(--red)'}">Correct answer: ${esc(q.answer)}</div>`:''}</div>`;
+      ${review?`<div class="tiny mono" style="color:${ok?'var(--green)':'var(--red)'}">Correct answer${answersOf(q.answer).length>1?'s (any one)':''}: ${answersOf(q.answer).map(esc).join(' or ')}</div>`:''}</div>`;
   }
-  const sol=review?`<div class="sol"><h4>Worked solution</h4>
-      <div class="steps">${(q.steps||[]).map(x=>`<div>${x}</div>`).join('')||'<div class="muted">No solution recorded.</div>'}</div>
-      ${q.tip?`<div class="tip"><b>Watch out</b>${q.tip}</div>`:''}</div>`:'';
+  const sol=review?solHtml(q):'';
   return `<div class="qcard" id="qc_${q.id}">
     <div class="qhead"><div class="row"><span class="qnum">Question ${i+1}</span>${tags}
       <span class="tiny muted mono">${esc(skillName(q.skill))}</span></div>${flagBtn}</div>
-    <div class="stem">${q.stem}</div>${body}${sol}</div>`;
+    <div class="stem">${stemHtml(q)}</div>${body}${sol}</div>`;
+}
+/* worked solution: several methods (fastest first) when available, else the plain steps */
+const METHOD_KIND={fast:'Fastest',desmos:'Desmos',classic:'Classic'};
+function solHtml(q){
+  const ms=Array.isArray(q.methods)&&q.methods.length?q.methods:[{kind:'',label:'',steps:q.steps||[]}];
+  const many=ms.length>1;
+  const seen={};
+  const body=ms.map(m=>{
+    const steps=(m.steps||[]).map(x=>`<div>${esc(x)}</div>`).join('')||'<div class="muted">No solution recorded.</div>';
+    const head=m.label||METHOD_KIND[m.kind]||'';
+    const tag=seen[m.kind]?'Another way':(METHOD_KIND[m.kind]||'Method');seen[m.kind]=1;
+    return `${head?`<div class="mhead ${esc(m.kind||'')}"><span class="mtag">${esc(tag)}</span>${m.label&&m.label!==METHOD_KIND[m.kind]?esc(m.label):''}</div>`:''}<div class="steps">${steps}</div>`;
+  }).join('');
+  return `<div class="sol"><h4>Worked solution${many?` · ${ms.length} ways`:''}</h4>${body}
+    ${q.tip?`<div class="tip"><b>Watch out</b>${esc(q.tip)}</div>`:''}</div>`;
 }
 function sheetStrip(){
   return RUN.questions.map((q,i)=>{
@@ -665,7 +735,7 @@ const accessOf=sid=>new Set(D.access.filter(a=>a.student_id===sid).map(a=>a.quiz
 
 /* ---------- students ---------- */
 function aStudents(){
-  if(!D.Q.size)return `<div class="empty">The question bank is empty. Start with the <b>Question bank</b> tab to import <span class="mono">all_questions.json</span>.</div>`;
+  if(!D.Q.size)return `<div class="empty">The question bank is empty. Start with the <b>Question bank</b> tab to import the question files (one per skill).</div>`;
   const cards=D.students.map(s=>{
     const acc=accessOf(s.id),att=D.attempts.filter(a=>a.student_id===s.id);
     const st=statsFor(s.id);const done=[...acc].filter(id=>st[id]).length;
@@ -789,7 +859,7 @@ VIEWS.grant=({id})=>{
             <span class="tiny mono muted cnt" data-ids="${ids.join(',')}"></span></summary>
           <div class="abody">${sk.levels.map(l=>`
             <div class="row" style="margin:8px 8px 2px;gap:8px">${cb(l.quizzes.map(q=>q.id))}<span class="lvlhead" style="margin:0">${l.level==='All'?'Mixed':l.level} · all ${l.quizzes.length}</span></div>
-            ${l.quizzes.map(q=>`<div class="qrow" style="padding-left:30px"><span class="row" style="gap:10px">${cb([q.id])}<span class="nm">Quiz #${q.seq}</span>
+            ${l.quizzes.map(q=>`<div class="qrow" style="padding-left:30px"><span class="row" style="gap:10px">${cb([q.id])}<span class="nm">${esc(quizLabel(q))}</span>
               <span class="tiny muted mono">${q.question_ids.length} q</span></span>${st[q.id]?scorePill(st[q.id]):''}</div>`).join('')}`).join('')}
           </div></details>`;}).join('')}</div></details>`;
   }).join('');
@@ -883,30 +953,64 @@ function aQuizzes(){
         <label class="fld" style="margin:0"><span class="lb">Questions per quiz</span><input type="number" id="qsize" min="3" max="40" value="${S.quiz_size}" style="max-width:120px"></label>
         <div class="switch ${S.split_by_level?'on':''}" id="qsplit" onclick="this.classList.toggle('on')" style="padding:9px 12px">
           <div class="track"><div class="knob"></div></div><div><b style="font-size:13.5px">One series per difficulty</b></div></div>
+        <div class="switch ${S.by_tag!==false?'on':''}" id="qbytag" onclick="this.classList.toggle('on')" style="padding:9px 12px">
+          <div class="track"><div class="knob"></div></div><div><b style="font-size:13.5px">One series per question type</b></div></div>
+        <label class="fld" style="margin:0"><span class="lb">Min. questions per type</span><input type="number" id="qmintag" min="2" max="20" value="${S.min_tag||5}" style="max-width:120px"></label>
         <button class="btn ghost sm" id="rbbtn" onclick="rebuildQuizzes()">Save &amp; rebuild</button></div>
-      <p class="tiny muted" style="margin:12px 0 0">Rebuilding re-cuts every automatic quiz. Students keep access to the new quizzes that contain questions they could already see. Past results stay in their history, but the "done" marks restart because the quizzes are new.</p></div>
+      <p class="tiny muted" style="margin:12px 0 0">With <b>one series per question type</b>, each type (tag) with at least the minimum number of questions in a difficulty gets its own quizzes, named after it. Smaller types and "Unclassified" questions go into "Mixed types" quizzes.<br>
+        Rebuilding re-cuts every automatic quiz. Students keep access to the new quizzes that contain questions they could already see. Past results stay in their history, but the "done" marks restart because the quizzes are new.</p></div>
     <div class="sect">${D.quizzes.length} quizzes</div>
     ${rows?`<table class="grid"><tr><th>Skill</th>${S.split_by_level?'<th>Easy</th><th>Medium</th><th>Hard</th>':'<th>Mixed</th>'}<th>Questions</th></tr>${rows}</table>`:'<div class="empty">No quizzes yet.</div>'}`;
 }
-function cutQuizzes(questions,size,split){
+/* split ids into n chunks of (almost) equal size, n = round(len/size) */
+function evenChunks(ids,size){
+  const n=Math.max(1,Math.round(ids.length/size)),base=Math.floor(ids.length/n),extra=ids.length%n,out=[];
+  for(let i=0,p=0;i<n;i++){const len=base+(i<extra?1:0);out.push(ids.slice(p,p+len));p+=len;}
+  return out;
+}
+/* within one skill+level: which tags get their own series, the rest is pooled */
+function tagSeries(qs,minTag){
+  const by=new Map();
+  qs.forEach(q=>{const t=q.tag||'Unclassified';if(!by.has(t))by.set(t,[]);by.get(t).push(q.id);});
+  let big=[...by].filter(([t,ids])=>t!=='Unclassified'&&ids.length>=minTag)
+    .sort((a,b)=>b[1].length-a[1].length||a[0].localeCompare(b[0]));
+  const restOf=()=>[...by].filter(([t])=>!big.some(x=>x[0]===t)).flatMap(x=>x[1]);
+  // never leave a "Mixed types" quiz of only 1-2 questions: fold the smallest type into it
+  while(big.length&&restOf().length>0&&restOf().length<3)big=big.slice(0,-1);
+  const out=big.map(([t,ids])=>({tag:t,ids}));
+  const rest=restOf();
+  if(rest.length)out.push({tag:null,ids:rest});
+  return out;
+}
+function cutQuizzes(questions,size,split,byTag=true,minTag=5){
   const out=[];
   SKILL_ORDER.forEach(sk=>{
     const groups=split?LEVELS.map(l=>[l,questions.filter(q=>q.skill===sk&&q.difficulty===l)]):[['All',questions.filter(q=>q.skill===sk)]];
     groups.forEach(([lvl,qs])=>{
-      const ids=qs.map(q=>q.id).sort((a,b)=>a-b);
-      const chunks=[];
-      for(let i=0;i<ids.length;i+=size)chunks.push(ids.slice(i,i+size));
-      // a tiny leftover (less than half a quiz) joins the previous quiz
-      if(chunks.length>1&&chunks[chunks.length-1].length<Math.ceil(size/2))chunks[chunks.length-2].push(...chunks.pop());
-      chunks.forEach((c,i)=>out.push({skill:sk,level:lvl,seq:i+1,title:quizTitle(sk,lvl,i+1),question_ids:c,auto:true}));
+      if(!qs.length)return;
+      const series=byTag?tagSeries(qs,minTag):[{tag:null,ids:qs.map(q=>q.id)}];
+      const onlyMixed=series.length===1&&series[0].tag===null;
+      let seq=0;
+      series.forEach(({tag,ids})=>{
+        const chunks=evenChunks(ids.slice().sort((a,b)=>a-b),size);
+        const name=tag||(byTag&&!onlyMixed?MIXED_TYPES:'Quiz');
+        chunks.forEach((c,i)=>{
+          seq++;
+          const label=name+(chunks.length>1||name==='Quiz'?' #'+(i+1):'');
+          out.push({skill:sk,level:lvl,seq,tag,label,title:quizTitle(sk,lvl,label),question_ids:c,auto:true});
+        });
+      });
     });
   });
   return out;
 }
+const cutAll=qs=>cutQuizzes(qs,D.settings.quiz_size||10,D.settings.split_by_level!==false,D.settings.by_tag!==false,D.settings.min_tag||5);
 async function rebuildQuizzes(){
   const size=Math.min(40,Math.max(3,parseInt($('qsize').value)||10));
   const split=$('qsplit').classList.contains('on');
-  if(D.quizzes.length&&!confirm(`Re-cut all quizzes into sets of ${size}${split?', one series per difficulty':''}?`))return;
+  const byTag=$('qbytag').classList.contains('on');
+  const minTag=Math.min(20,Math.max(2,parseInt($('qmintag').value)||5));
+  if(D.quizzes.length&&!confirm(`Re-cut all quizzes into sets of about ${size}${split?', one series per difficulty':''}${byTag?', one series per question type':''}?`))return;
   busy($('rbbtn'),true,'Rebuilding…');
   try{
     // what each student could see before
@@ -915,10 +1019,11 @@ async function rebuildQuizzes(){
       const acc=accessOf(s.id);
       seen[s.id]=new Set(D.quizzes.filter(q=>acc.has(q.id)).flatMap(q=>q.question_ids));
     });
-    let r=await sb.from('settings').update({quiz_size:size,split_by_level:split}).eq('id',1);if(r.error)throw r.error;
+    let r=await sb.from('settings').update({quiz_size:size,split_by_level:split,by_tag:byTag,min_tag:minTag}).eq('id',1);if(r.error)throw r.error;
+    Object.assign(D.settings,{quiz_size:size,split_by_level:split,by_tag:byTag,min_tag:minTag});
     const oldIds=D.quizzes.filter(q=>q.auto).map(q=>q.id);
     for(let i=0;i<oldIds.length;i+=200){r=await sb.from('quizzes').delete().in('id',oldIds.slice(i,i+200));if(r.error)throw r.error;}
-    const fresh=cutQuizzes([...D.Q.values()],size,split);
+    const fresh=cutAll([...D.Q.values()]);
     const inserted=await insertBatches('quizzes',fresh);
     const grants=[];
     D.students.forEach(s=>inserted.forEach(q=>{if(q.question_ids.some(id=>seen[s.id].has(id)))grants.push({student_id:s.id,quiz_id:q.id});}));
@@ -948,15 +1053,16 @@ function aBank(){
     const t=qs.filter(q=>q.skill===k).length;
     return `<tr><td><button class="link" style="font-size:13.5px;text-align:left" onclick="BANK_SKILL='${k}';render()">${esc(skillName(k))}</button></td>${LEVELS.map(l=>`<td class="n">${c(l)||'—'}</td>`).join('')}<td class="n"><b>${t}</b></td></tr>`;
   }).join('');
-  const list=BANK_SKILL?qs.filter(q=>q.skill===BANK_SKILL).sort((a,b)=>LEVELS.indexOf(a.difficulty)-LEVELS.indexOf(b.difficulty)||a.id-b.id):[];
+  const list=BANK_SKILL?qs.filter(q=>q.skill===BANK_SKILL).sort((a,b)=>LEVELS.indexOf(a.difficulty)-LEVELS.indexOf(b.difficulty)||(a.tag||'').localeCompare(b.tag||'')||a.id-b.id):[];
+  const nFig=qs.filter(q=>q.image||(q.choice_images&&q.choice_images.length)).length;
   return `<div class="row between" style="margin-bottom:14px"><h2 style="font-size:23px">Question bank · ${qs.length}</h2>
-      <label class="btn go sm" style="display:inline-block">Import JSON<input type="file" accept=".json,application/json" style="display:none" onchange="importFile(this)"></label></div>
-    <p class="tiny muted">Import a JSON array in the same format as <span class="mono">all_questions.json</span> (fields: skill, difficulty, type, stem, choices/correct or answer, steps, tip). Questions already in the bank are skipped; new ones are added to the end of the matching quizzes.</p>
+      <label class="btn go sm" style="display:inline-block">Import JSON files<input type="file" multiple accept=".json,application/json" style="display:none" onchange="importFile(this)"></label></div>
+    <p class="tiny muted">Select one or several question files at once (one file per skill). Each question carries its College Board ID: importing a file again updates those questions instead of duplicating them. New questions are added to the matching quizzes. ${nFig} questions have a figure; figures are served from the <span class="mono">figures/</span> folder of the site.</p>
     <div id="impst" class="tiny mono" style="min-height:18px;margin-bottom:6px"></div>
     <table class="grid"><tr><th>Skill (click to browse)</th><th>Easy</th><th>Medium</th><th>Hard</th><th>Total</th></tr>${rows}</table>
     ${BANK_SKILL?`<div class="row between"><div class="sect">${esc(skillName(BANK_SKILL))} · ${list.length}</div><button class="link" onclick="BANK_SKILL='';render()">Close</button></div>
       ${list.map(q=>`<details class="acc sk"><summary><span class="ttl"><span class="chev">▶</span>${lvlTag(q.difficulty)}
-        <span class="tiny" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:560px">#${q.id} · ${esc(q.stem.replace(/\$/g,'').slice(0,110))}</span></span>
+        <span class="tiny" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:560px"><span class="mono muted">${esc(q.cb_id||'#'+q.id)}</span> · <b>${esc(q.tag||'')}</b> · ${esc(stemText(q).slice(0,100))}</span></span>
         <button class="link danger" style="font-size:12px" onclick="event.preventDefault();delQuestion(${q.id})">Delete</button></summary>
         <div class="abody" data-q="${q.id}"></div></details>`).join('')}`:''}`;
 }
@@ -966,49 +1072,74 @@ document.addEventListener('toggle',e=>{
   const b=t.querySelector(':scope>.abody[data-q]');
   if(b&&!b.innerHTML){b.innerHTML=qBlock(D.Q.get(Number(b.dataset.q)),0,{review:true,given:null,readonly:true}).replace('Question 1','Preview');typeset(b);}
 },true);
+function normQuestion(q){
+  const strArr=a=>Array.isArray(a)&&a.length?a.map(String):null;
+  return {cb_id:q.cb_id?String(q.cb_id):null,skill:q.skill,difficulty:q.difficulty,type:q.type,stem:q.stem,
+    choices:q.type==='mcq'?q.choices:null,correct:q.type==='mcq'?q.correct:null,
+    answer:q.type==='spr'?String(q.answer):null,steps:Array.isArray(q.steps)?q.steps:[],tip:q.tip||'',
+    tag:q.tag?String(q.tag):'Unclassified',image:q.image?String(q.image):null,choice_images:strArr(q.choice_images),
+    methods:Array.isArray(q.methods)&&q.methods.length?q.methods:null};
+}
 async function importFile(input){
-  const f=input.files[0];if(!f)return;
+  const files=[...input.files];if(!files.length)return;
   const st=$('impst');
-  let arr;
-  try{arr=JSON.parse(await f.text());}catch(e){st.textContent='Not valid JSON.';return;}
-  if(!Array.isArray(arr))arr=arr.questions||arr.bank||[];
+  let arr=[];
+  for(const f of files){
+    try{let a=JSON.parse(await f.text());if(!Array.isArray(a))a=a.questions||a.bank||[];arr=arr.concat(a);}
+    catch(e){st.textContent=`${f.name}: not valid JSON.`;input.value='';return;}
+  }
   const norm=s=>(s||'').replace(/\s+/g,' ').trim();
   const keyOf=q=>[q.skill,norm(q.stem),JSON.stringify(q.type==='mcq'?q.choices:String(q.answer))].join('|');
-  const have=new Set([...D.Q.values()].map(keyOf));
-  const bad=[],rows=[];
+  const all=[...D.Q.values()];
+  const byCb=new Map(all.filter(q=>q.cb_id).map(q=>[q.cb_id,q]));
+  const have=new Set(all.map(keyOf));
+  const bad=[],ups=[],ins=[],seenCb=new Set();
   arr.forEach((q,i)=>{
     if(!SKILLS[q.skill]||!LEVELS.includes(q.difficulty)||!['mcq','spr'].includes(q.type)||!q.stem){bad.push(i);return;}
     if(q.type==='mcq'&&(!Array.isArray(q.choices)||typeof q.correct!=='number')){bad.push(i);return;}
     if(q.type==='spr'&&(q.answer==null||q.answer==='')){bad.push(i);return;}
-    const key=keyOf(q);if(have.has(key))return;have.add(key);
-    rows.push({skill:q.skill,difficulty:q.difficulty,type:q.type,stem:q.stem,
-      choices:q.type==='mcq'?q.choices:null,correct:q.type==='mcq'?q.correct:null,
-      answer:q.type==='spr'?String(q.answer):null,steps:Array.isArray(q.steps)?q.steps:[],tip:q.tip||''});
+    const row=normQuestion(q);
+    if(row.cb_id){if(seenCb.has(row.cb_id))return;seenCb.add(row.cb_id);ups.push(row);return;}
+    const key=keyOf(q);if(have.has(key))return;have.add(key);ins.push(row);
   });
-  if(!rows.length){st.textContent=`Nothing new to import (${arr.length} read${bad.length?`, ${bad.length} invalid`:''}).`;input.value='';return;}
-  if(!confirm(`Import ${rows.length} new question${rows.length>1?'s':''}?${bad.length?` (${bad.length} invalid rows will be skipped)`:''}`)){input.value='';return;}
+  const nNew=ups.filter(r=>!byCb.has(r.cb_id)).length+ins.length,nUpd=ups.length-ups.filter(r=>!byCb.has(r.cb_id)).length;
+  const fl=`${files.length} file${files.length>1?'s':''}`;
+  if(!ups.length&&!ins.length){st.textContent=`Nothing to import (${arr.length} read from ${fl}${bad.length?`, ${bad.length} invalid`:''}).`;input.value='';return;}
+  if(!confirm(`${fl}: ${nNew} new question${nNew>1?'s':''}${nUpd?`, ${nUpd} updated`:''}. Import?${bad.length?` (${bad.length} invalid rows will be skipped)`:''}`)){input.value='';return;}
   try{
     st.textContent='Uploading questions…';
-    const ins=await insertBatches('questions',rows);
+    const saved=[];
+    for(let i=0;i<ups.length;i+=300){
+      const {data,error}=await sb.from('questions').upsert(ups.slice(i,i+300),{onConflict:'cb_id'}).select();
+      if(error)throw error;saved.push(...data);
+    }
+    if(ins.length)saved.push(...await insertBatches('questions',ins));
+    const fresh=saved.filter(q=>!(q.cb_id&&byCb.has(q.cb_id)));
     st.textContent='Placing them into quizzes…';
-    if(D.quizzes.length)await placeIntoQuizzes(ins);
-    else await insertBatches('quizzes',cutQuizzes(ins,D.settings.quiz_size||10,D.settings.split_by_level!==false),false);
+    if(!D.quizzes.length)await insertBatches('quizzes',cutAll(saved),false);
+    else if(fresh.length)await placeIntoQuizzes(fresh);
     await loadData();
-    st.textContent='';toast(`Imported ${ins.length} questions.`);render();
-  }catch(e){st.textContent='Error: '+errMsg(e);await loadData();}
+    st.textContent='';toast(`Imported: ${fresh.length} new, ${saved.length-fresh.length} updated.`);render();
+  }catch(e){st.textContent='Error: '+errMsg(e)+(/cb_id|tag|choice_images|column/i.test(errMsg(e))?' (did you run supabase/migration_2026_10.sql?)':'');await loadData();}
   input.value='';
 }
-/* fill the last automatic quiz of the same skill+level while it has room, then open the next one */
+/* add new questions to the last quiz of their series (same skill, level and type) while it has room */
 async function placeIntoQuizzes(newQs){
-  const size=D.settings.quiz_size||10,split=D.settings.split_by_level!==false;
+  const size=D.settings.quiz_size||10,split=D.settings.split_by_level!==false,byTag=D.settings.by_tag!==false;
   const touched=new Map(),created=[];
   newQs.sort((a,b)=>a.id-b.id).forEach(q=>{
     const lvl=split?q.difficulty:'All';
-    const series=D.quizzes.concat(created).filter(z=>z.auto&&z.skill===q.skill&&z.level===lvl).sort((a,b)=>a.seq-b.seq);
+    const pool=D.quizzes.concat(created).filter(z=>z.auto&&z.skill===q.skill&&z.level===lvl);
+    let tag=byTag?(q.tag||null):null;
+    if(tag!==null&&!pool.some(z=>z.tag===tag))tag=null;           // no series for this type: goes to "Mixed types"
+    const series=pool.filter(z=>(z.tag||null)===tag).sort((a,b)=>a.seq-b.seq);
     let last=series[series.length-1];
     if(!last||last.question_ids.length>=size){
-      last={skill:q.skill,level:lvl,seq:(last?last.seq:0)+1,auto:true,question_ids:[]};
-      last.title=quizTitle(q.skill,lvl,last.seq);created.push(last);
+      const maxSeq=pool.reduce((m,z)=>Math.max(m,z.seq),0);
+      const name=tag||(byTag&&pool.some(z=>z.tag)?MIXED_TYPES:'Quiz');
+      const label=name+(series.length||name==='Quiz'?' #'+(series.length+1):'');
+      last={skill:q.skill,level:lvl,seq:maxSeq+1,tag,label,auto:true,question_ids:[]};
+      last.title=quizTitle(q.skill,lvl,label);created.push(last);
     }else if(last.id)touched.set(last.id,last);
     last.question_ids=last.question_ids.concat(q.id);
   });
@@ -1040,7 +1171,7 @@ function aReview(){
     ${flagged.length?flagged.map(({a,qid})=>{const q=D.Q.get(qid);const ok=q&&isRight(q,(a.answers||{})[qid]);
       return `<div class="card flat" style="padding:12px 16px;margin-bottom:10px"><div class="row between">
         <div style="min-width:0;flex:1"><b>${esc(name(a.student_id))}</b> <span class="tiny muted mono">· ${esc(a.title)} · ${fmtDate(a.created_at)}</span>
-        <div class="tiny" style="margin-top:4px">${q?lvlTag(q.difficulty)+' '+esc(q.stem.replace(/\$/g,'').slice(0,140)):'(question deleted)'}</div></div>
+        <div class="tiny" style="margin-top:4px">${q?lvlTag(q.difficulty)+' '+esc(stemText(q).slice(0,140)):'(question deleted)'}</div></div>
         <div class="row"><span class="pill ${ok?'done':'bad'}">${ok?'right':'wrong'}</span>
         <button class="btn ghost xs" onclick="REVIEW_FILTER='flag';go('attempt',{id:${a.id},back:&quot;go('admin',{tab:'review'})&quot;})">Open</button></div></div></div>`;}).join('')
       :'<div class="empty">No flags right now.</div>'}
