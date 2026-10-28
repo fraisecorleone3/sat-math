@@ -416,6 +416,15 @@ VIEWS.dash=()=>{
       <div class="abody">${skillsHtml}</div></details>`;
   }).join('')||`<div class="empty">${FILTER==='todo'?'Everything is done. Nice work!':'Nothing here yet.'}</div>`;
 
+  const nMist=mistakePool().length,nHard=hardPool().length;
+  const practice=`<div class="grid" style="margin-bottom:22px;grid-template-columns:repeat(auto-fit,minmax(260px,1fr))">
+      <div class="card flat"><div class="row between"><div><b>My mistakes</b>
+        <div class="tiny muted">${nMist?`${nMist} question${nMist>1?'s':''} to fix`:'Nothing to fix right now'}</div></div>
+        <button class="btn ${nMist?'go':'ghost'} sm" ${nMist?'':'disabled'} onclick="go('special',{kind:'mistakes'})">Review</button></div></div>
+      <div class="card flat"><div class="row between"><div><b>Mixed Hard</b>
+        <div class="tiny muted">${nHard?`${Math.min(HARD_N,nHard)} random Hard questions, topic hidden`:'No Hard question open yet'}</div></div>
+        <button class="btn ghost sm" ${nHard?'':'disabled'} onclick="go('special',{kind:'hard'})">Start</button></div></div>
+    </div>`;
   const pool=accessiblePool();
   const mix=ME.mix_enabled&&pool.length>=3?`<div class="card flat" style="margin-top:22px"><div class="row between">
       <div><b>Mixed set</b><div class="tiny muted">Random questions drawn from everything you can access (${pool.length} questions).</div></div>
@@ -428,6 +437,7 @@ VIEWS.dash=()=>{
       <div class="stat"><div class="n">${answered?pct(right,answered)+'%':'—'}</div><div class="l">Overall accuracy</div></div>
     </div>
     ${resume}
+    ${practice}
     ${next&&!RUN?`<div class="card" style="margin-bottom:22px"><div class="row between">
       <div><div class="eyebrow">Up next</div><b style="font-size:16px">${esc(next.title)}</b>
       <div class="tiny muted mono">${next.question_ids.length} questions</div></div>
@@ -470,6 +480,27 @@ function accessiblePool(){
   const ids=new Set(D.quizzes.flatMap(q=>q.question_ids));
   return [...ids].map(id=>D.Q.get(id)).filter(Boolean);
 }
+/* My mistakes: questions whose LAST recorded answer (all attempts, oldest to newest) was wrong or blank.
+   A later correct answer removes the question; only questions still open to the student are kept. */
+function mistakePool(){
+  const last=new Map();
+  D.attempts.filter(a=>a.student_id===ME.id).slice().sort((a,b)=>a.created_at<b.created_at?-1:a.created_at>b.created_at?1:a.id-b.id)
+    .forEach(a=>{const ans=a.answers||{};(a.question_ids||[]).forEach(qid=>{const q=D.Q.get(qid);if(q)last.set(qid,isRight(q,ans[qid]));});});
+  const open=new Set(D.quizzes.flatMap(q=>q.question_ids));
+  return [...last].filter(([id,ok])=>!ok&&open.has(id)).map(([id])=>D.Q.get(id))
+    .sort((a,b)=>SKILL_ORDER.indexOf(a.skill)-SKILL_ORDER.indexOf(b.skill)||LEVELS.indexOf(a.difficulty)-LEVELS.indexOf(b.difficulty)||a.id-b.id);
+}
+/* Mixed Hard: random Hard questions from every quiz open to the student; topic hidden until review */
+const HARD_N=20;
+const hardPool=()=>accessiblePool().filter(q=>q.difficulty==='Hard');
+const SPECIAL={
+  mistakes:{eyebrow:'Review',title:'My mistakes',
+    text:n=>`${n} question${n>1?'s':''} you got wrong (or left blank) and have not answered correctly since. Each one you get right leaves the list.`,
+    pool:()=>mistakePool(),pick:p=>p,hide:false,runTitle:n=>'My mistakes · '+n+' question'+(n>1?'s':'')},
+  hard:{eyebrow:'Test day practice',title:'Mixed Hard',
+    text:n=>`${n} Hard questions drawn at random from all your open topics. The topic and question type stay hidden until you submit — recognizing them is part of the exercise.`,
+    pool:()=>hardPool(),pick:p=>shuffle(p).slice(0,HARD_N),hide:true,runTitle:n=>'Mixed Hard · '+n+' questions'}
+};
 
 /* ============================================================
    PRE-QUIZ + MIXED SET
@@ -510,6 +541,23 @@ function beginQuiz(quizId){
   const qs=q.question_ids.map(id=>D.Q.get(id)).filter(Boolean);
   if(!qs.length){toast('This quiz has no questions.');return;}
   startRun(q.title,q.id,qs);
+}
+VIEWS.special=({kind})=>{
+  const K=SPECIAL[kind];if(!K)return `<div class="empty">Not available.</div>`;
+  const pool=K.pool(),n=Math.min(pool.length,kind==='hard'?HARD_N:pool.length);
+  TIMER_ON=false;
+  const body=n?`<p class="muted tiny" style="margin:10px 0 20px">${K.text(n)}</p>${timerSwitch(Math.max(5,Math.round(n*(kind==='hard'?1.6:1.5))))}
+      <button class="btn go wide" style="margin-top:20px" onclick="beginSpecial('${kind}')">Start</button>`
+    :`<p class="muted" style="margin:12px 0 0">${kind==='mistakes'?'Nothing to review right now: every question you missed has since been answered correctly.':'No Hard question is open for you yet.'}</p>`;
+  return `<button class="back" onclick="home()">${I.back} Dashboard</button>
+    <div class="card" style="max-width:560px"><div class="eyebrow">${K.eyebrow}</div>
+      <h2 style="font-size:25px;line-height:1.15">${K.title}</h2>${body}</div>`;
+};
+function beginSpecial(kind){
+  const K=SPECIAL[kind],qs=K.pick(K.pool());
+  if(!qs.length){toast('No question available.');return;}
+  startRun(K.runTitle(qs.length),null,qs);
+  if(K.hide){RUN.hideMeta=true;saveRun();render();}
 }
 function saveRun(){if(!ME)return;lsSet('satm_run_'+ME.id,RUN?{...RUN,questions:undefined}:null);}
 function dropRun(){if(!confirm('Discard this unfinished quiz?'))return;RUN=null;saveRun();render();}
@@ -573,7 +621,8 @@ function beginMix(){
 ============================================================ */
 function qBlock(q,i,{review=false,given,flag=false,readonly=false}={}){
   if(!q)return `<div class="qcard"><div class="qnum">Question ${i+1}</div><p class="muted tiny">This question is no longer available.</p></div>`;
-  const tags=lvlTag(q.difficulty)+(q.tag?`<span class="tag ttag">${esc(q.tag)}</span>`:'');
+  const hide=!review&&RUN&&RUN.hideMeta;
+  const tags=lvlTag(q.difficulty)+(q.tag&&!hide?`<span class="tag ttag">${esc(q.tag)}</span>`:'');
   const flagged=review?flag:!!(RUN&&RUN.flags[q.id]);
   const flagBtn=readonly?(flagged?`<span class="pill warn">${I.flag.replace('<svg','<svg width="13" height="13"')} Flagged</span>`:'')
     :`<button class="flagbtn ${flagged?'on':''}" id="fl_${q.id}" onclick="tglFlag(${q.id})">${I.flag}<span>${flagged?'Flagged':'Flag for '+esc(TUTOR)}</span></button>`;
@@ -598,7 +647,7 @@ function qBlock(q,i,{review=false,given,flag=false,readonly=false}={}){
   const sol=review?solHtml(q):'';
   return `<div class="qcard" id="qc_${q.id}">
     <div class="qhead"><div class="row"><span class="qnum">Question ${i+1}</span>${tags}
-      <span class="tiny muted mono">${esc(skillName(q.skill))}</span></div>${flagBtn}</div>
+      ${hide?'':`<span class="tiny muted mono">${esc(skillName(q.skill))}</span>`}</div>${flagBtn}</div>
     <div class="stem">${stemHtml(q)}</div>${body}${sol}</div>`;
 }
 /* worked solution: several methods (fastest first) when available, else the plain steps */
@@ -717,7 +766,7 @@ VIEWS.attempt=({id,fresh,back})=>{
         const q=D.Q.get(qid),ok=q&&isRight(q,ans[qid]);
         return `<button class="dot ${ok?'ok':'ko'} ${flags[qid]?'flagged':''}" onclick="jumpTo(${qid})">${i+1}</button>`;}).join('')}</div>
       ${fresh&&nf?`<p class="tiny muted" style="margin:14px 0 0">You flagged ${nf} question${nf>1?'s':''}. ${esc(TUTOR)} will see ${nf>1?'them':'it'}.</p>`:''}
-      ${fresh?`<div class="row" style="margin-top:16px">${a.quiz_id?`<button class="btn ghost sm" onclick="go('pre',{quizId:${a.quiz_id}})">Retake</button>`:''}<button class="btn go sm" onclick="home()">Back to dashboard</button></div>`:''}
+      ${fresh?`<div class="row" style="margin-top:16px">${a.quiz_id?`<button class="btn ghost sm" onclick="go('pre',{quizId:${a.quiz_id}})">Retake</button>`:''}${!a.quiz_id&&/^Mixed Hard/.test(a.title)?`<button class="btn ghost sm" onclick="go('special',{kind:'hard'})">New Mixed Hard</button>`:''}${!a.quiz_id&&/^My mistakes/.test(a.title)&&mistakePool().length?`<button class="btn ghost sm" onclick="go('special',{kind:'mistakes'})">My mistakes (${mistakePool().length} left)</button>`:''}<button class="btn go sm" onclick="home()">Back to dashboard</button></div>`:''}
     </div>
     <div class="chips" style="margin-bottom:16px">${[['all','All questions'],['wrong','Mistakes only'],['flag','Flagged']].map(([k,l])=>`<button class="chip ${REVIEW_FILTER===k?'on':''}" onclick="REVIEW_FILTER='${k}';render()">${l}</button>`).join('')}</div>
     ${qs.map((q,i)=>show(q,i)?qBlock(q,i,{review:true,given:ans[a.question_ids[i]],flag:!!flags[a.question_ids[i]],readonly:true}):'').join('')||'<div class="empty">Nothing to show with this filter.</div>'}`;
